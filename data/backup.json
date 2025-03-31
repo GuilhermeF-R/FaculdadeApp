@@ -1,10 +1,10 @@
 [
     {
-        "nome": "a",
+        "nome": "aa",
         "modulo": "a",
         "status": "Em andamento",
-        "livros": [],
-        "videos": [],
+        "conteudos_livros": [],
+        "conteudos_videos": [],
         "aulas_ao_vivo": []
     }
 ]
