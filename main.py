@@ -4,6 +4,7 @@ import webbrowser
 import json
 import sqlite3
 # pylint: disable=no-name-in-module
+# pylint: disable=no-member
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget, QListWidget,
     QPushButton, QLineEdit, QTabWidget, QFileDialog, QMessageBox,
@@ -14,6 +15,16 @@ from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap, QFont
 
 #-------------------------------------imports---------------------------------------
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
 
 # Database setup
 def criar_banco_dados():
@@ -100,17 +111,14 @@ class Materia:
         self.conteudos_videos = []
         self.aulas_ao_vivo = []
         
-        # Load books/documents
         cursor.execute('SELECT nome, caminho, tipo, is_divisao, ordem FROM conteudos WHERE materia_id=? AND tipo="livro" ORDER BY ordem', (self.id,))
         for nome, caminho, tipo, is_divisao, ordem in cursor.fetchall():
             self.conteudos_livros.append(Conteudo(nome, caminho, tipo, is_divisao, ordem))
         
-        # Load videos
         cursor.execute('SELECT nome, caminho, tipo, is_divisao, ordem FROM conteudos WHERE materia_id=? AND tipo="video" ORDER BY ordem', (self.id,))
         for nome, caminho, tipo, is_divisao, ordem in cursor.fetchall():
             self.conteudos_videos.append(Conteudo(nome, caminho, tipo, is_divisao, ordem))
         
-        # Load live classes
         cursor.execute('SELECT nome, caminho, ordem FROM conteudos WHERE materia_id=? AND tipo="aula" ORDER BY ordem', (self.id,))
         for nome, caminho, ordem in cursor.fetchall():
             self.aulas_ao_vivo.append(Conteudo(nome, caminho, 'aula', False, ordem))
@@ -122,7 +130,6 @@ class Materia:
         cursor = conn.cursor()
         
         try:
-            # Get max order for this type
             cursor.execute('SELECT MAX(ordem) FROM conteudos WHERE materia_id=? AND tipo=?', (self.id, conteudo.tipo))
             max_ordem = cursor.fetchone()[0] or 0
             
@@ -137,7 +144,7 @@ class Materia:
         finally:
             conn.close()
         
-        self.carregar_conteudos()  # Atualiza a lista de conteúdos
+        self.carregar_conteudos()
     
     def atualizar_ordem_conteudos(self, tipo, conteudos_ordenados):
         conn = sqlite3.connect('material.db')
@@ -239,7 +246,7 @@ class EditarMateriaDialog(QDialog):
         }
 
 class DraggableListWidget(QListWidget):
-    itemMoved = pyqtSignal(str, list)  # tipo, lista de itens
+    itemMoved = pyqtSignal(str, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -269,9 +276,10 @@ class JanelaMateria(QMainWindow):
         self.setWindowTitle(f"Matéria: {materia.nome}")
         self.setGeometry(200, 200, 800, 600)
         
-         # Definir o ícone da janela
-        if os.path.exists('icons/logo.png'):
-            self.setWindowIcon(QIcon('icons/logo.png'))
+        # Definir o ícone da janela
+        icon_path = resource_path('icons/logo.png')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
         self.tabs = QTabWidget()
         
@@ -373,14 +381,12 @@ class JanelaMateria(QMainWindow):
         item = lista.currentItem()
         if item:
             texto = item.text()
-            if "-------------------" not in texto:  # Não abre divisões
+            if "-------------------" not in texto:
                 caminho = texto.split(" | ")[1]
                 
-                # Verifica se é um link web
                 if caminho.startswith(('http://', 'https://')):
                     webbrowser.open(caminho)
                 else:
-                    # Abre arquivo local
                     if sys.platform == 'win32':
                         os.startfile(caminho)
                     elif sys.platform == 'darwin':
@@ -394,10 +400,9 @@ class JanelaMateria(QMainWindow):
             lista_original = self.materia.conteudos_livros
         elif tipo == 'video':
             lista_original = self.materia.conteudos_videos
-        else:  # aula
+        else:
             lista_original = self.materia.aulas_ao_vivo
         
-        # Criar nova lista ordenada
         nova_ordem = []
         for texto in itens_texto:
             if "-------------------" in texto:
@@ -410,7 +415,6 @@ class JanelaMateria(QMainWindow):
             if conteudo:
                 nova_ordem.append(conteudo)
         
-        # Atualizar no banco de dados
         self.materia.atualizar_ordem_conteudos(tipo, nova_ordem)
         self.atualizar_listas()
     
@@ -516,16 +520,16 @@ class JanelaMateria(QMainWindow):
             self.lista_aulas.addItem(str(aula))
 
 class JanelaConfig(QMainWindow):
-    temaAlterado = pyqtSignal(bool)  # True para escuro, False para claro
+    temaAlterado = pyqtSignal(bool)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Configurações")
         self.setGeometry(300, 300, 500, 400)
         
-         # Definir o ícone da janela
-        if os.path.exists('icons/logo.png'):
-            self.setWindowIcon(QIcon('icons/logo.png'))
+        icon_path = resource_path('icons/logo.png')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
         self.tabs = QTabWidget()
         
@@ -574,7 +578,7 @@ class JanelaConfig(QMainWindow):
         self.botao_tema.clicked.connect(self.mudar_tema)
         self.botao_backup.clicked.connect(self.exportar_backup)
         
-        self.tema_escuro = True  # Tema escuro por padrão
+        self.tema_escuro = True
     
     def mudar_tema(self):
         self.tema_escuro = not self.tema_escuro
@@ -709,13 +713,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("App de Matérias")
         self.setGeometry(100, 100, 800, 600)
         
-         # Definir o ícone da janela
-        if os.path.exists('icons/logo.png'):
-            self.setWindowIcon(QIcon('icons/logo.png'))
+        icon_path = resource_path('icons/logo.png')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
-        # Variável para controlar o tema
-        self.tema_escuro = True  # Tema escuro por padrão
-        
+        self.tema_escuro = True
         self.materias = Materia.carregar_todas()
         
         self.lista_materias = QListWidget()
@@ -892,17 +894,22 @@ class MainWindow(QMainWindow):
     
     def atualizar_lista_materias(self):
         self.lista_materias.clear()
+        book_icon_path = resource_path('icons/book.png')
+        book_icon = QIcon(book_icon_path) if os.path.exists(book_icon_path) else QIcon()
+        
         for materia in self.materias:
             item = QListWidgetItem(str(materia))
             item.setData(Qt.UserRole, materia.id)
-            item.setIcon(QIcon("icons/book.png"))
+            item.setIcon(book_icon)
             self.lista_materias.addItem(item)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    if not os.path.exists("icons"):
-        os.makedirs("icons")
+    # Criar diretório de ícones se não existir
+    icons_dir = resource_path('icons')
+    if not os.path.exists(icons_dir):
+        os.makedirs(icons_dir)
     
     window = MainWindow()
     window.show()
