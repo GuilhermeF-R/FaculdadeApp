@@ -1,38 +1,90 @@
-import sys
 import os
-import webbrowser
-import json
+import sys
 import sqlite3
-# pylint: disable=no-name-in-module
-# pylint: disable=no-member
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QVBoxLayout, QWidget, QListWidget,
-    QPushButton, QLineEdit, QTabWidget, QFileDialog, QMessageBox,
-    QInputDialog, QLabel, QListWidgetItem, QHBoxLayout,
-    QComboBox, QDialog, QFormLayout, QDialogButtonBox, QTextBrowser
-)
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap, QFont
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QListWidget,
+                             QPushButton, QTabWidget, QFileDialog, QMessageBox, QInputDialog,
+                             QListWidgetItem)
+from PyQt5.QtCore import Qt
+from PIL import Image
+import shutil
+from functools import partial
 
-#-------------------------------------imports---------------------------------------
+class Optimizer:
+    @staticmethod
+    def get_image_format(file_path):
+        """Determina o formato da imagem sem usar imghdr (que está obsoleto)"""
+        try:
+            with Image.open(file_path) as img:
+                return img.format
+        except:
+            return None
 
-def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-
-    return os.path.join(base_path, relative_path)
-
-# Database setup
-def criar_banco_dados():
-    try:
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
+    @staticmethod
+    def optimize_image(input_path, output_folder, quality=85, max_size=(1920, 1080)):
+        """Reduz tamanho de imagens mantendo qualidade visual"""
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"Arquivo não encontrado: {input_path}")
         
-        cursor.execute('''
+        filename = os.path.basename(input_path)
+        output_path = os.path.join(output_folder, f"opt_{filename}")
+        
+        try:
+            with Image.open(input_path) as img:
+                # Redimensiona se for muito grande
+                if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
+                    img.thumbnail(max_size, Image.LANCZOS)
+                
+                # Determina o formato
+                img_format = Optimizer.get_image_format(input_path) or 'JPEG'
+                
+                # Configurações de qualidade por formato
+                save_kwargs = {'optimize': True}
+                if img_format.upper() in ['JPEG', 'JPG']:
+                    save_kwargs['quality'] = quality
+                    save_kwargs['progressive'] = True
+                elif img_format.upper() == 'PNG':
+                    save_kwargs['compress_level'] = 6
+                
+                img.save(output_path, **save_kwargs)
+            
+            return output_path
+        except Exception as e:
+            print(f"Erro ao otimizar imagem: {e}")
+            return input_path
+
+    @staticmethod
+    def optimize_generic_file(input_path, output_folder):
+        """Copia arquivos não-otimizáveis mantendo a organização"""
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"Arquivo não encontrado: {input_path}")
+        
+        filename = os.path.basename(input_path)
+        output_path = os.path.join(output_folder, f"org_{filename}")
+        
+        try:
+            shutil.copy2(input_path, output_path)
+            return output_path
+        except Exception as e:
+            print(f"Erro ao organizar arquivo: {e}")
+            return input_path
+
+class MaterialApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Gerenciador de Materiais Escolares Leve")
+        self.setGeometry(100, 100, 800, 600)
+        
+        self.optimized_folder = "optimized_media"
+        os.makedirs(self.optimized_folder, exist_ok=True)
+        
+        self.init_db()
+        self.init_ui()
+    
+    def init_db(self):
+        self.conn = sqlite3.connect('materiais_leve.db')
+        self.cursor = self.conn.cursor()
+        
+        self.cursor.execute('''
         CREATE TABLE IF NOT EXISTS materias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nome TEXT,
@@ -40,877 +92,195 @@ def criar_banco_dados():
             status TEXT
         )''')
         
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS conteudos (
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS arquivos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             materia_id INTEGER,
-            tipo TEXT,
             nome TEXT,
-            caminho TEXT,
-            is_divisao BOOLEAN DEFAULT 0,
-            ordem INTEGER DEFAULT 0,
+            caminho_original TEXT,
+            caminho_otimizado TEXT,
+            tipo TEXT,
+            tamanho_original REAL,
+            tamanho_otimizado REAL,
             FOREIGN KEY (materia_id) REFERENCES materias(id)
         )''')
         
-        conn.commit()
-        print("Banco de dados criado/verificado com sucesso!")
-    except Exception as e:
-        print(f"Erro ao criar banco de dados: {e}")
-    finally:
-        conn.close()
-
-criar_banco_dados()
-
-class Conteudo:
-    def __init__(self, nome="", caminho="", tipo="", is_divisao=False, ordem=0):
-        self.nome = nome
-        self.caminho = caminho
-        self.tipo = tipo
-        self.is_divisao = is_divisao
-        self.ordem = ordem
-
-    def __str__(self):
-        if self.is_divisao:
-            return f"------------------- {self.nome} -------------------"
-        return f"{self.nome} | {self.caminho}"
-
-class Materia:
-    def __init__(self, id=None, nome="", modulo="", status="Em andamento"):
-        self.id = id
-        self.nome = nome
-        self.modulo = modulo
-        self.status = status
-        self.conteudos_livros = []
-        self.conteudos_videos = []
-        self.aulas_ao_vivo = []
-
-    def salvar(self):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
+        self.conn.commit()
+    
+    def init_ui(self):
+        layout = QVBoxLayout()
+        self.tabs = QTabWidget()
         
-        if self.id is None:
-            cursor.execute(
-                'INSERT INTO materias (nome, modulo, status) VALUES (?, ?, ?)',
-                (self.nome, self.modulo, self.status)
-            )
-            self.id = cursor.lastrowid
+        # Tab de documentos
+        self.doc_tab = QWidget()
+        self.doc_list = QListWidget()
+        self.btn_add_doc = QPushButton("Adicionar Documento")
+        self.btn_open_doc = QPushButton("Abrir Documento")
+        
+        doc_layout = QVBoxLayout()
+        doc_layout.addWidget(self.doc_list)
+        doc_layout.addWidget(self.btn_add_doc)
+        doc_layout.addWidget(self.btn_open_doc)
+        self.doc_tab.setLayout(doc_layout)
+        
+        # Tab de imagens
+        self.image_tab = QWidget()
+        self.image_list = QListWidget()
+        self.btn_add_image = QPushButton("Adicionar Imagem")
+        self.btn_view_image = QPushButton("Visualizar Imagem")
+        
+        image_layout = QVBoxLayout()
+        image_layout.addWidget(self.image_list)
+        image_layout.addWidget(self.btn_add_image)
+        image_layout.addWidget(self.btn_view_image)
+        self.image_tab.setLayout(image_layout)
+        
+        self.tabs.addTab(self.doc_tab, "Documentos")
+        self.tabs.addTab(self.image_tab, "Imagens")
+        layout.addWidget(self.tabs)
+        
+        self.btn_optimize_all = QPushButton("Otimizar Todos os Arquivos")
+        layout.addWidget(self.btn_optimize_all)
+        
+        container = QWidget()
+        container.setLayout(layout)
+        self.setCentralWidget(container)
+        
+        self.btn_add_doc.clicked.connect(partial(self.add_file, 'documento'))
+        self.btn_open_doc.clicked.connect(self.open_file)
+        self.btn_add_image.clicked.connect(partial(self.add_file, 'imagem'))
+        self.btn_view_image.clicked.connect(self.view_image)
+        self.btn_optimize_all.clicked.connect(self.optimize_all)
+        
+        self.load_files()
+    
+    def add_file(self, file_type):
+        if file_type == 'imagem':
+            file_filter = "Imagens (*.jpg *.jpeg *.png *.bmp *.gif);;Todos os arquivos (*)"
         else:
-            cursor.execute(
-                'UPDATE materias SET nome=?, modulo=?, status=? WHERE id=?',
-                (self.nome, self.modulo, self.status, self.id)
+            file_filter = "Documentos (*.pdf *.doc *.docx *.xls *.xlsx *.ppt *.pptx *.txt);;Todos os arquivos (*)"
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, f"Selecionar {file_type.capitalize()}", "", file_filter)
+        
+        if file_path:
+            nome = os.path.basename(file_path)
+            tamanho = os.path.getsize(file_path) / (1024 * 1024)  # MB
+            
+            self.cursor.execute(
+                'INSERT INTO arquivos (nome, caminho_original, tipo, tamanho_original) VALUES (?, ?, ?, ?)',
+                (nome, file_path, file_type, tamanho)
             )
-        
-        conn.commit()
-        conn.close()
+            self.conn.commit()
+            self.optimize_file(self.cursor.lastrowid)
+            self.load_files()
     
-    def carregar_conteudos(self):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
+    def optimize_file(self, file_id):
+        self.cursor.execute('SELECT * FROM arquivos WHERE id=?', (file_id,))
+        file_data = self.cursor.fetchone()
         
-        self.conteudos_livros = []
-        self.conteudos_videos = []
-        self.aulas_ao_vivo = []
+        if not file_data:
+            return
         
-        cursor.execute('SELECT nome, caminho, tipo, is_divisao, ordem FROM conteudos WHERE materia_id=? AND tipo="livro" ORDER BY ordem', (self.id,))
-        for nome, caminho, tipo, is_divisao, ordem in cursor.fetchall():
-            self.conteudos_livros.append(Conteudo(nome, caminho, tipo, is_divisao, ordem))
-        
-        cursor.execute('SELECT nome, caminho, tipo, is_divisao, ordem FROM conteudos WHERE materia_id=? AND tipo="video" ORDER BY ordem', (self.id,))
-        for nome, caminho, tipo, is_divisao, ordem in cursor.fetchall():
-            self.conteudos_videos.append(Conteudo(nome, caminho, tipo, is_divisao, ordem))
-        
-        cursor.execute('SELECT nome, caminho, ordem FROM conteudos WHERE materia_id=? AND tipo="aula" ORDER BY ordem', (self.id,))
-        for nome, caminho, ordem in cursor.fetchall():
-            self.aulas_ao_vivo.append(Conteudo(nome, caminho, 'aula', False, ordem))
-        
-        conn.close()
-    
-    def adicionar_conteudo(self, conteudo):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
+        id, _, nome, original_path, opt_path, tipo, size_orig, size_opt = file_data
         
         try:
-            cursor.execute('SELECT MAX(ordem) FROM conteudos WHERE materia_id=? AND tipo=?', (self.id, conteudo.tipo))
-            max_ordem = cursor.fetchone()[0] or 0
+            if tipo == 'imagem':
+                optimized_path = Optimizer.optimize_image(original_path, self.optimized_folder)
+            else:
+                optimized_path = Optimizer.optimize_generic_file(original_path, self.optimized_folder)
             
-            cursor.execute(
-                'INSERT INTO conteudos (materia_id, tipo, nome, caminho, is_divisao, ordem) VALUES (?, ?, ?, ?, ?, ?)',
-                (self.id, conteudo.tipo, conteudo.nome, conteudo.caminho, conteudo.is_divisao, max_ordem + 1)
+            opt_size = os.path.getsize(optimized_path) / (1024 * 1024)
+            self.cursor.execute(
+                'UPDATE arquivos SET caminho_otimizado=?, tamanho_otimizado=? WHERE id=?',
+                (optimized_path, opt_size, id)
             )
+            self.conn.commit()
             
-            conn.commit()
         except Exception as e:
-            print(f"Erro ao adicionar conteúdo: {e}")
-        finally:
-            conn.close()
-        
-        self.carregar_conteudos()
+            print(f"Erro ao processar arquivo {id}: {e}")
     
-    def atualizar_ordem_conteudos(self, tipo, conteudos_ordenados):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
+    def optimize_all(self):
+        self.cursor.execute('SELECT id FROM arquivos WHERE caminho_otimizado IS NULL')
+        files_to_optimize = self.cursor.fetchall()
         
-        for ordem, conteudo in enumerate(conteudos_ordenados):
-            if conteudo.tipo == 'aula':
-                cursor.execute(
-                    'UPDATE conteudos SET ordem=? WHERE materia_id=? AND tipo=? AND nome=? AND caminho=?',
-                    (ordem, self.id, tipo, conteudo.nome, conteudo.caminho)
-                )
-            else:
-                cursor.execute(
-                    'UPDATE conteudos SET ordem=? WHERE materia_id=? AND tipo=? AND nome=? AND is_divisao=?',
-                    (ordem, self.id, tipo, conteudo.nome, conteudo.is_divisao)
-                )
+        for (file_id,) in files_to_optimize:
+            self.optimize_file(file_id)
         
-        conn.commit()
-        conn.close()
-        self.carregar_conteudos()
+        self.load_files()
+        QMessageBox.information(self, "Concluído", "Todos os arquivos foram processados!")
     
-    def remover_conteudo(self, conteudo):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
-        
-        if conteudo.tipo == 'aula':
-            cursor.execute('DELETE FROM conteudos WHERE materia_id=? AND tipo="aula" AND nome=? AND caminho=?',
-                          (self.id, conteudo.nome, conteudo.caminho))
-        else:
-            cursor.execute('DELETE FROM conteudos WHERE materia_id=? AND tipo=? AND nome=? AND is_divisao=?',
-                        (self.id, conteudo.tipo, conteudo.nome, 1 if conteudo.is_divisao else 0))
-        
-        conn.commit()
-        conn.close()
-        self.carregar_conteudos()
-    
-    def adicionar_divisao(self, tipo, nome="Div"):
-        divisao = Conteudo(nome=nome, tipo=tipo, is_divisao=True)
-        self.adicionar_conteudo(divisao)
-    
-    @classmethod
-    def carregar_todas(cls):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT id, nome, modulo, status FROM materias ORDER BY nome')
-        materias = []
-        for id, nome, modulo, status in cursor.fetchall():
-            materia = cls(id, nome, modulo, status)
-            materia.carregar_conteudos()
-            materias.append(materia)
-        
-        conn.close()
-        return materias
-    
-    @classmethod
-    def remover_por_id(cls, id):
-        conn = sqlite3.connect('material.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM conteudos WHERE materia_id=?', (id,))
-        cursor.execute('DELETE FROM materias WHERE id=?', (id,))
-        
-        conn.commit()
-        conn.close()
-    
-    def __str__(self):
-        return f"{self.nome} ({self.modulo}) - {self.status}"
-
-class EditarMateriaDialog(QDialog):
-    def __init__(self, materia, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Editar Matéria")
-        self.materia = materia
-        
-        self.nome_edit = QLineEdit(materia.nome)
-        self.modulo_edit = QLineEdit(materia.modulo)
-        self.status_combo = QComboBox()
-        self.status_combo.addItems(["Em andamento", "Concluído", "Aguardando", "Reprovado", "Material de Uso"])
-        self.status_combo.setCurrentText(materia.status)
-        
-        layout = QFormLayout()
-        layout.addRow("Nome:", self.nome_edit)
-        layout.addRow("Módulo:", self.modulo_edit)
-        layout.addRow("Status:", self.status_combo)
-        
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        
-        layout.addRow(buttons)
-        self.setLayout(layout)
-    
-    def get_data(self):
-        return {
-            "nome": self.nome_edit.text(),
-            "modulo": self.modulo_edit.text(),
-            "status": self.status_combo.currentText()
-        }
-
-class DraggableListWidget(QListWidget):
-    itemMoved = pyqtSignal(str, list)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragDropMode(QListWidget.InternalMove)
-        self.setDefaultDropAction(Qt.MoveAction)
-        self.setSelectionMode(QListWidget.SingleSelection)
-        self.tipo = ""
-        self.setAcceptDrops(True)
-        self.setDragEnabled(True)
-        self.setDropIndicatorShown(True)
-    
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self.emitir_movimento()
-    
-    def emitir_movimento(self):
-        items = []
-        for i in range(self.count()):
-            item = self.item(i)
-            items.append(item.text())
-        self.itemMoved.emit(self.tipo, items)
-
-class JanelaMateria(QMainWindow):
-    def __init__(self, materia, parent=None):
-        super().__init__(parent)
-        self.materia = materia
-        self.setWindowTitle(f"Matéria: {materia.nome}")
-        self.setGeometry(200, 200, 800, 600)
-        
-        # Definir o ícone da janela
-        icon_path = resource_path('icons/logo.png')
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        
-        self.tabs = QTabWidget()
-        
-        # Books/Documents Tab
-        self.tab_livros = QWidget()
-        self.lista_livros = DraggableListWidget()
-        self.lista_livros.tipo = "livro"
-        self.botao_add_div_livro = QPushButton("Adicionar Divisão")
-        self.botao_add_livro = QPushButton("Adicionar Arquivo")
-        self.botao_remover_item_livro = QPushButton("Remover")
-        
-        layout_livros = QVBoxLayout()
-        layout_livros.addWidget(self.lista_livros)
-        
-        botoes_livros = QHBoxLayout()
-        botoes_livros.addWidget(self.botao_add_div_livro)
-        botoes_livros.addWidget(self.botao_add_livro)
-        botoes_livros.addWidget(self.botao_remover_item_livro)
-        layout_livros.addLayout(botoes_livros)
-        
-        self.tab_livros.setLayout(layout_livros)
-        
-        # Videos Tab
-        self.tab_videos = QWidget()
-        self.lista_videos = DraggableListWidget()
-        self.lista_videos.tipo = "video"
-        self.botao_add_div_video = QPushButton("Adicionar Divisão")
-        self.botao_add_video = QPushButton("Adicionar Vídeo")
-        self.botao_remover_item_video = QPushButton("Remover")
-        
-        layout_videos = QVBoxLayout()
-        layout_videos.addWidget(self.lista_videos)
-        
-        botoes_videos = QHBoxLayout()
-        botoes_videos.addWidget(self.botao_add_div_video)
-        botoes_videos.addWidget(self.botao_add_video)
-        botoes_videos.addWidget(self.botao_remover_item_video)
-        layout_videos.addLayout(botoes_videos)
-        
-        self.tab_videos.setLayout(layout_videos)
-        
-        # Live Classes Tab
-        self.tab_aulas = QWidget()
-        self.lista_aulas = DraggableListWidget()
-        self.lista_aulas.tipo = "aula"
-        self.botao_add_aula = QPushButton("Adicionar Aula")
-        self.botao_remover_aula = QPushButton("Remover Aula")
-        
-        layout_aulas = QVBoxLayout()
-        layout_aulas.addWidget(self.lista_aulas)
-        
-        botoes_aulas = QHBoxLayout()
-        botoes_aulas.addWidget(self.botao_add_aula)
-        botoes_aulas.addWidget(self.botao_remover_aula)
-        layout_aulas.addLayout(botoes_aulas)
-        
-        self.tab_aulas.setLayout(layout_aulas)
-        
-        self.tabs.addTab(self.tab_livros, "Livros")
-        self.tabs.addTab(self.tab_videos, "Vídeos")
-        self.tabs.addTab(self.tab_aulas, "Aulas ao Vivo")
-        
-        layout = QVBoxLayout()
-        layout.addWidget(self.tabs)
-        
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
-        
-        # Connections
-        self.botao_add_div_livro.clicked.connect(lambda: self.adicionar_divisao('livro'))
-        self.botao_add_livro.clicked.connect(lambda: self.adicionar_arquivo('livro'))
-        self.botao_remover_item_livro.clicked.connect(lambda: self.remover_item('livro'))
-        self.lista_livros.itemMoved.connect(self.atualizar_ordem_itens)
-        self.lista_livros.itemDoubleClicked.connect(lambda: self.abrir_item('livro'))
-        
-        self.botao_add_div_video.clicked.connect(lambda: self.adicionar_divisao('video'))
-        self.botao_add_video.clicked.connect(lambda: self.adicionar_arquivo('video'))
-        self.botao_remover_item_video.clicked.connect(lambda: self.remover_item('video'))
-        self.lista_videos.itemMoved.connect(self.atualizar_ordem_itens)
-        self.lista_videos.itemDoubleClicked.connect(lambda: self.abrir_item('video'))
-        
-        self.botao_add_aula.clicked.connect(self.adicionar_aula)
-        self.botao_remover_aula.clicked.connect(self.remover_aula)
-        self.lista_aulas.itemMoved.connect(self.atualizar_ordem_itens)
-        self.lista_aulas.itemDoubleClicked.connect(lambda: self.abrir_item('aula'))
-        
-        self.atualizar_listas()
-    
-    def abrir_item(self, tipo):
-        lista = None
-        if tipo == 'livro':
-            lista = self.lista_livros
-        elif tipo == 'video':
-            lista = self.lista_videos
-        else:
-            lista = self.lista_aulas
-        
-        item = lista.currentItem()
-        if item:
-            texto = item.text()
-            if "-------------------" not in texto:
-                caminho = texto.split(" | ")[1]
-                
-                if caminho.startswith(('http://', 'https://')):
-                    webbrowser.open(caminho)
-                else:
-                    if sys.platform == 'win32':
-                        os.startfile(caminho)
-                    elif sys.platform == 'darwin':
-                        os.system(f'open "{caminho}"')
-                    else:
-                        os.system(f'xdg-open "{caminho}"')
-    
-    def atualizar_ordem_itens(self, tipo, itens_texto):
-        conteudos = []
-        if tipo == 'livro':
-            lista_original = self.materia.conteudos_livros
-        elif tipo == 'video':
-            lista_original = self.materia.conteudos_videos
-        else:
-            lista_original = self.materia.aulas_ao_vivo
-        
-        nova_ordem = []
-        for texto in itens_texto:
-            if "-------------------" in texto:
-                nome = texto.split("---")[1].strip()
-                conteudo = next((c for c in lista_original if c.nome == nome and getattr(c, 'is_divisao', False)), None)
-            else:
-                nome = texto.split(" | ")[0]
-                conteudo = next((c for c in lista_original if c.nome == nome and not getattr(c, 'is_divisao', False)), None)
-            
-            if conteudo:
-                nova_ordem.append(conteudo)
-        
-        self.materia.atualizar_ordem_conteudos(tipo, nova_ordem)
-        self.atualizar_listas()
-    
-    def adicionar_divisao(self, tipo):
-        nome, ok = QInputDialog.getText(self, "Nova Divisão", "Nome da divisão (opcional):")
-        if ok:
-            nome = nome if nome else "Div"
-            self.materia.adicionar_divisao(tipo, nome)
-            self.atualizar_listas()
-    
-    def adicionar_arquivo(self, tipo):
-        if tipo == 'livro':
-            filtros = "Documentos (*.pdf *.doc *.docx *.xls *.xlsx *.ppt *.pptx *.xml *.txt);;Todos os arquivos (*)"
-        else:
-            filtros = "Vídeos (*.mp4 *.avi *.mov *.mkv);;Todos os arquivos (*)"
-        
-        arquivos, _ = QFileDialog.getOpenFileNames(self, f"Selecionar Arquivo(s) de {tipo.capitalize()}", "", filtros)
-        
-        if arquivos:
-            for arquivo in arquivos:
-                nome = os.path.basename(arquivo)
-                conteudo = Conteudo(nome, arquivo, tipo)
+    def open_file(self):
+        selected = self.doc_list.currentItem()
+        if selected:
+            file_id = selected.data(Qt.UserRole)
+            self.cursor.execute('SELECT caminho_otimizado, caminho_original FROM arquivos WHERE id=?', (file_id,))
+            result = self.cursor.fetchone()
+            if result:
+                opt_path, orig_path = result
+                path_to_open = opt_path if opt_path else orig_path
                 try:
-                    self.materia.adicionar_conteudo(conteudo)
+                    os.startfile(path_to_open)
                 except Exception as e:
-                    QMessageBox.warning(self, "Erro", f"Não foi possível adicionar o arquivo: {e}")
+                    QMessageBox.warning(self, "Erro", f"Não foi possível abrir o arquivo: {e}")
+    
+    def view_image(self):
+        selected = self.image_list.currentItem()
+        if selected:
+            file_id = selected.data(Qt.UserRole)
+            self.cursor.execute('SELECT caminho_otimizado, caminho_original FROM arquivos WHERE id=?', (file_id,))
+            result = self.cursor.fetchone()
+            if result:
+                opt_path, orig_path = result
+                path_to_view = opt_path if opt_path else orig_path
+                try:
+                    os.startfile(path_to_view)
+                except Exception as e:
+                    QMessageBox.warning(self, "Erro", f"Não foi possível abrir a imagem: {e}")
+    
+    def load_files(self):
+        self.doc_list.clear()
+        self.image_list.clear()
+        
+        # Carrega documentos
+        self.cursor.execute('SELECT id, nome, tamanho_original, tamanho_otimizado FROM arquivos WHERE tipo="documento"')
+        for id, nome, size_orig, size_opt in self.cursor.fetchall():
+            item_text = f"{nome} - Original: {size_orig:.1f}MB"
+            if size_opt:
+                reduction = (size_orig - size_opt) / size_orig * 100
+                item_text += f" | Organizado: {size_opt:.1f}MB ({reduction:.0f}% diferente)"
             
-            self.atualizar_listas()
-    
-    def adicionar_aula(self):
-        link, ok = QInputDialog.getText(self, "Adicionar Aula ao Vivo", "Cole o link da aula (YouTube/Zoom):")
-        if ok and link:
-            nome = f"Aula {len(self.materia.aulas_ao_vivo) + 1}"
-            conteudo = Conteudo(nome, link, 'aula')
-            self.materia.adicionar_conteudo(conteudo)
-            self.atualizar_listas()
-    
-    def remover_item(self, tipo):
-        lista = self.lista_livros if tipo == 'livro' else self.lista_videos
-        item = lista.currentItem()
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, id)
+            self.doc_list.addItem(item)
         
-        if item:
-            resposta = QMessageBox.question(
-                self, "Confirmar", "Tem certeza que deseja remover este item?",
-                QMessageBox.Yes | QMessageBox.No
-            )
+        # Carrega imagens
+        self.cursor.execute('SELECT id, nome, tamanho_original, tamanho_otimizado FROM arquivos WHERE tipo="imagem"')
+        for id, nome, size_orig, size_opt in self.cursor.fetchall():
+            item_text = f"{nome} - Original: {size_orig:.1f}MB"
+            if size_opt:
+                reduction = (size_orig - size_opt) / size_orig * 100
+                item_text += f" | Otimizado: {size_opt:.1f}MB ({reduction:.0f}% menor)"
             
-            if resposta == QMessageBox.Yes:
-                texto = item.text()
-                if texto.startswith("-------------------") and texto.endswith("-------------------"):
-                    nome = texto.replace("-", "").strip()
-                    caminho = ""
-                    is_divisao = True
-                else:
-                    partes = texto.split(" | ")
-                    nome = partes[0]
-                    caminho = partes[1] if len(partes) > 1 else ""
-                    is_divisao = False
-                
-                conteudo = Conteudo(nome, caminho, tipo, is_divisao)
-                self.materia.remover_conteudo(conteudo)
-                self.atualizar_listas()
-            
-    def remover_aula(self):
-        item = self.lista_aulas.currentItem()
-        
-        if item:
-            resposta = QMessageBox.question(
-                self, "Confirmar", "Tem certeza que deseja remover esta aula?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            
-            if resposta == QMessageBox.Yes:
-                nome = item.text().split(" | ")[0]
-                link = item.text().split(" | ")[1]
-                conteudo = Conteudo(nome, link, 'aula')
-                self.materia.remover_conteudo(conteudo)
-                self.atualizar_listas()
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, id)
+            self.image_list.addItem(item)
     
-    def atualizar_listas(self):
-        self.lista_livros.clear()
-        for conteudo in self.materia.conteudos_livros:
-            item = QListWidgetItem(str(conteudo))
-            if conteudo.is_divisao:
-                item.setBackground(Qt.lightGray)
-                font = QFont()
-                font.setBold(True)
-                item.setFont(font)
-            self.lista_livros.addItem(item)
-        
-        self.lista_videos.clear()
-        for conteudo in self.materia.conteudos_videos:
-            item = QListWidgetItem(str(conteudo))
-            if conteudo.is_divisao:
-                item.setBackground(Qt.lightGray)
-                font = QFont()
-                font.setBold(True)
-                item.setFont(font)
-            self.lista_videos.addItem(item)
-        
-        self.lista_aulas.clear()
-        for aula in self.materia.aulas_ao_vivo:
-            self.lista_aulas.addItem(str(aula))
-
-class JanelaConfig(QMainWindow):
-    temaAlterado = pyqtSignal(bool)
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Configurações")
-        self.setGeometry(300, 300, 500, 400)
-        
-        icon_path = resource_path('icons/logo.png')
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        
-        self.tabs = QTabWidget()
-        
-        tab_config = QWidget()
-        self.botao_tema = QPushButton("Mudar Tema (Claro/Escuro)")
-        self.botao_backup = QPushButton("Exportar Backup (JSON)")
-        
-        layout_config = QVBoxLayout()
-        layout_config.addWidget(self.botao_tema)
-        layout_config.addWidget(self.botao_backup)
-        tab_config.setLayout(layout_config)
-        
-        tab_ajuda = QWidget()
-        texto_ajuda = QTextBrowser()
-        texto_ajuda.setPlainText(
-            "=== AJUDA ===\n\n"
-            "1. Adicionar Matéria:\n"
-            "   - Clique em 'Adicionar Matéria' e preencha os dados\n\n"
-            "2. Editar/Remover Matéria:\n"
-            "   - Selecione uma matéria e clique nos botões correspondentes\n\n"
-            "3. Adicionar Conteúdo:\n"
-            "   - Na aba da matéria, use os botões para adicionar:\n"
-            "     * Livros/Documentos (PDF, Word, Excel, etc.)\n"
-            "     * Vídeos (MP4, AVI, etc.)\n"
-            "     * Aulas ao vivo (links)\n\n"
-            "4. Divisões:\n"
-            "   - Adicione divisões para organizar seus materiais\n\n"
-            "5. Pesquisar:\n"
-            "   - Digite na barra de pesquisa para filtrar matérias"
-        )
-        
-        layout_ajuda = QVBoxLayout()
-        layout_ajuda.addWidget(texto_ajuda)
-        tab_ajuda.setLayout(layout_ajuda)
-        
-        self.tabs.addTab(tab_config, "Configurações")
-        self.tabs.addTab(tab_ajuda, "Ajuda")
-        
-        layout = QVBoxLayout()
-        layout.addWidget(self.tabs)
-        
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
-        
-        self.botao_tema.clicked.connect(self.mudar_tema)
-        self.botao_backup.clicked.connect(self.exportar_backup)
-        
-        self.tema_escuro = True
-    
-    def mudar_tema(self):
-        self.tema_escuro = not self.tema_escuro
-        self.temaAlterado.emit(self.tema_escuro)
-        self.aplicar_tema()
-    
-    def aplicar_tema(self):
-        estilo_comum = """
-            QMainWindow, QDialog {
-                font-size: 14px;
-            }
-            QPushButton {
-                padding: 10px 15px;
-                min-height: 40px;
-                min-width: 120px;
-            }
-            QLineEdit {
-                padding: 8px;
-                min-height: 30px;
-            }
-            QListWidget {
-                font-size: 14px;
-            }
-            QListWidget::item {
-                padding: 6px;
-            }
-            QTabWidget::pane {
-                border: 1px solid #444;
-                padding: 5px;
-            }
-            QTabBar::tab {
-                padding: 8px 12px;
-            }
-        """
-        
-        if self.tema_escuro:
-            self.setStyleSheet(estilo_comum + """
-                QMainWindow, QDialog {
-                    background-color: #333;
-                    color: white;
-                }
-                QPushButton {
-                    background-color: #555;
-                    color: white;
-                    border: 1px solid #777;
-                }
-                QListWidget {
-                    background-color: #444;
-                    color: white;
-                }
-                QLineEdit {
-                    background-color: #444;
-                    color: white;
-                    border: 1px solid #555;
-                }
-                QTabWidget::pane {
-                    border: 1px solid #444;
-                    background: #333;
-                }
-                QTabBar::tab {
-                    background: #555;
-                    color: white;
-                    border: 1px solid #444;
-                }
-                QTabBar::tab:selected {
-                    background: #777;
-                }
-            """)
-        else:
-            self.setStyleSheet(estilo_comum + """
-                QMainWindow, QDialog {
-                    background-color: #f0f0f0;
-                    color: black;
-                }
-                QPushButton {
-                    background-color: #4CAF50;
-                    color: white;
-                    border: none;
-                }
-                QListWidget {
-                    background-color: white;
-                    color: black;
-                }
-                QLineEdit {
-                    background-color: white;
-                    color: black;
-                    border: 1px solid #ccc;
-                }
-                QTabWidget::pane {
-                    border: 1px solid #ccc;
-                    background: #f0f0f0;
-                }
-                QTabBar::tab {
-                    background: #ddd;
-                    color: black;
-                    border: 1px solid #ccc;
-                }
-                QTabBar::tab:selected {
-                    background: #f0f0f0;
-                }
-            """)
-    
-    def exportar_backup(self):
-        caminho = QFileDialog.getSaveFileName(
-            self, "Exportar Backup", "", "JSON Files (*.json)"
-        )[0]
-        
-        if caminho:
-            materias = Materia.carregar_todas()
-            dados = []
-            
-            for materia in materias:
-                dados.append({
-                    "nome": materia.nome,
-                    "modulo": materia.modulo,
-                    "status": materia.status,
-                    "conteudos_livros": [{"nome": c.nome, "caminho": c.caminho, "is_divisao": c.is_divisao} 
-                                      for c in materia.conteudos_livros],
-                    "conteudos_videos": [{"nome": c.nome, "caminho": c.caminho, "is_divisao": c.is_divisao} 
-                                       for c in materia.conteudos_videos],
-                    "aulas_ao_vivo": [{"nome": a.nome, "caminho": a.caminho} for a in materia.aulas_ao_vivo]
-                })
-            
-            with open(caminho, 'w') as f:
-                json.dump(dados, f, indent=4)
-            
-            QMessageBox.information(self, "Sucesso", "Backup exportado com sucesso!")
-
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("App de Matérias")
-        self.setGeometry(100, 100, 800, 600)
-        
-        icon_path = resource_path('icons/logo.png')
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        
-        self.tema_escuro = True
-        self.materias = Materia.carregar_todas()
-        
-        self.lista_materias = QListWidget()
-        self.lista_materias.setIconSize(QSize(32, 32))
-        self.botao_add_materia = QPushButton("Adicionar Matéria")
-        self.botao_editar_materia = QPushButton("Editar Matéria")
-        self.botao_remover_materia = QPushButton("Remover Matéria")
-        self.botao_config = QPushButton("Configurações")
-        self.barra_pesquisa = QLineEdit()
-        self.barra_pesquisa.setPlaceholderText("Pesquisar matéria...")
-        
-        layout = QVBoxLayout()
-        layout.addWidget(self.barra_pesquisa)
-        layout.addWidget(self.lista_materias)
-        
-        botoes_layout = QHBoxLayout()
-        botoes_layout.addWidget(self.botao_add_materia)
-        botoes_layout.addWidget(self.botao_editar_materia)
-        botoes_layout.addWidget(self.botao_remover_materia)
-        layout.addLayout(botoes_layout)
-        
-        layout.addWidget(self.botao_config)
-        
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
-        
-        self.botao_add_materia.clicked.connect(self.adicionar_materia)
-        self.botao_editar_materia.clicked.connect(self.editar_materia)
-        self.botao_remover_materia.clicked.connect(self.remover_materia)
-        self.botao_config.clicked.connect(self.abrir_config)
-        self.lista_materias.itemDoubleClicked.connect(self.abrir_materia)
-        self.barra_pesquisa.textChanged.connect(self.filtrar_materias)
-        
-        self.aplicar_tema()
-        self.atualizar_lista_materias()
-    
-    def aplicar_tema(self):
-        estilo_comum = """
-            QMainWindow {
-                font-size: 14px;
-            }
-            QPushButton {
-                padding: 10px 15px;
-                min-height: 40px;
-                min-width: 120px;
-            }
-            QLineEdit {
-                padding: 8px;
-                min-height: 30px;
-            }
-            QListWidget {
-                font-size: 14px;
-            }
-            QListWidget::item {
-                padding: 6px;
-            }
-        """
-        
-        if self.tema_escuro:
-            self.setStyleSheet(estilo_comum + """
-                QMainWindow {
-                    background-color: #333;
-                    color: white;
-                }
-                QPushButton {
-                    background-color: #555;
-                    color: white;
-                    border: 1px solid #777;
-                }
-                QListWidget {
-                    background-color: #444;
-                    color: white;
-                }
-                QLineEdit {
-                    background-color: #444;
-                    color: white;
-                    border: 1px solid #555;
-                }
-            """)
-        else:
-            self.setStyleSheet(estilo_comum + """
-                QMainWindow {
-                    background-color: #f0f0f0;
-                    color: black;
-                }
-                QPushButton {
-                    background-color: #4CAF50;
-                    color: white;
-                    border: none;
-                }
-                QListWidget {
-                    background-color: white;
-                    color: black;
-                }
-                QLineEdit {
-                    background-color: white;
-                    color: black;
-                    border: 1px solid #ccc;
-                }
-            """)
-    
-    def mudar_tema(self, escuro):
-        self.tema_escuro = escuro
-        self.aplicar_tema()
-    
-    def adicionar_materia(self):
-        nome, ok = QInputDialog.getText(self, "Nova Matéria", "Nome da Matéria:")
-        if ok and nome:
-            modulo, ok = QInputDialog.getText(self, "Módulo", "Módulo da Matéria:")
-            if ok and modulo:
-                status, ok = QInputDialog.getItem(
-                    self, "Status", "Selecione o status:",
-                    ["Em andamento", "Concluído", "Aguardando", "Reprovado", "Material de Uso"], 0, False
-                )
-                if ok:
-                    nova_materia = Materia(nome=nome, modulo=modulo, status=status)
-                    nova_materia.salvar()
-                    self.materias = Materia.carregar_todas()
-                    self.atualizar_lista_materias()
-    
-    def editar_materia(self):
-        item = self.lista_materias.currentItem()
-        if item:
-            materia_id = item.data(Qt.UserRole)
-            materia = next((m for m in self.materias if m.id == materia_id), None)
-            if materia:
-                dialog = EditarMateriaDialog(materia)
-                if dialog.exec_():
-                    data = dialog.get_data()
-                    materia.nome = data["nome"]
-                    materia.modulo = data["modulo"]
-                    materia.status = data["status"]
-                    materia.salvar()
-                    self.atualizar_lista_materias()
-    
-    def remover_materia(self):
-        item = self.lista_materias.currentItem()
-        if item:
-            materia_id = item.data(Qt.UserRole)
-            materia = next((m for m in self.materias if m.id == materia_id), None)
-            if materia:
-                resposta = QMessageBox.question(
-                    self, "Confirmar", f"Tem certeza que deseja remover '{materia.nome}'?",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if resposta == QMessageBox.Yes:
-                    Materia.remover_por_id(materia.id)
-                    self.materias = Materia.carregar_todas()
-                    self.atualizar_lista_materias()
-    
-    def abrir_materia(self, item):
-        materia_id = item.data(Qt.UserRole)
-        materia = next((m for m in self.materias if m.id == materia_id), None)
-        if materia:
-            self.janela_materia = JanelaMateria(materia, self)
-            self.janela_materia.show()
-    
-    def abrir_config(self):
-        self.janela_config = JanelaConfig(self)
-        self.janela_config.temaAlterado.connect(self.mudar_tema)
-        self.janela_config.show()
-    
-    def filtrar_materias(self):
-        texto = self.barra_pesquisa.text().lower()
-        for i in range(self.lista_materias.count()):
-            item = self.lista_materias.item(i)
-            materia_id = item.data(Qt.UserRole)
-            materia = next((m for m in self.materias if m.id == materia_id), None)
-            if materia and texto.lower() in materia.nome.lower():
-                item.setHidden(False)
-            else:
-                item.setHidden(True)
-    
-    def atualizar_lista_materias(self):
-        self.lista_materias.clear()
-        book_icon_path = resource_path('icons/book.png')
-        book_icon = QIcon(book_icon_path) if os.path.exists(book_icon_path) else QIcon()
-        
-        for materia in self.materias:
-            item = QListWidgetItem(str(materia))
-            item.setData(Qt.UserRole, materia.id)
-            item.setIcon(book_icon)
-            self.lista_materias.addItem(item)
+    def closeEvent(self, event):
+        self.conn.close()
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    # Criar diretório de ícones se não existir
-    icons_dir = resource_path('icons')
-    if not os.path.exists(icons_dir):
-        os.makedirs(icons_dir)
+    # Verifica se o Pillow está instalado
+    try:
+        from PIL import Image
+    except ImportError:
+        QMessageBox.critical(None, "Erro", 
+            "Pillow não está instalado. Instale com: pip install pillow")
+        sys.exit(1)
     
-    window = MainWindow()
+    window = MaterialApp()
     window.show()
     sys.exit(app.exec_())
